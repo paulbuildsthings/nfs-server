@@ -15,4 +15,6 @@ RUN mkdir -p /var/lib/nfs/rpc_pipefs && \
 COPY entrypoint /entrypoint
 RUN chmod +x /entrypoint
 
+VOLUME ["/export"]
+EXPOSE 2049/tcp
 ENTRYPOINT ["/entrypoint"]
