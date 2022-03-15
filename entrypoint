@@ -1,0 +1,111 @@
+#!/bin/bash
+
+# make sure we react to these signals by running stop() when we see them
+# this ensures a clean shutdown of our container
+trap "stop; exit 0;" SIGTERM SIGINT
+
+stop()
+{
+    # we're here because we've seen SIGTERM, likely via a Docker stop command or similar
+    echo "Terminating NFS processes."
+    /usr/sbin/exportfs -uav
+    /usr/sbin/rpc.nfsd 0
+    pid1=`pidof rpc.nfsd`
+    pid2=`pidof rpc.mountd`
+    # For IPv6 bug:
+    pid3=`pidof rpcbind`
+    kill -TERM $pid1 $pid2 $pid3 > /dev/null 2>&1
+    echo "Terminated."
+    exit 0
+}
+
+# Create the exports file
+rm -f /etc/exports
+echo "/export *({{READ_ONLY}},fsid=0,{{ASYNC}},no_subtree_check,no_auth_nlm,insecure,no_root_squash)" > /etc/exports
+
+# check if the READ_ONLY variable is set (rather than a null string) using parameter expansion
+if [ -z ${READ_ONLY+y} ]; then
+    echo "The READ_ONLY environment variable is unset or null, defaulting to 'rw'. Clients will have read/write access."
+    sed -i "s/{{READ_ONLY}}/rw/g" /etc/exports
+else
+    echo "The READ_ONLY environment variable is set. Clients will have read-only access."
+    sed -i "s/{{READ_ONLY}}/ro/g" /etc/exports
+fi
+
+# check if the ASYNC variable is set (rather than a null string) using parameter expansion
+if [ -z "${ASYNC+y}" ]; then
+    echo "The ASYNC environment variable is unset or null, defaulting to 'sync' mode. Writes will be immediately written to disk."
+    sed -i "s/{{ASYNC}}/sync/g" /etc/exports
+else
+    echo "The ASYNC environment variable is set, using 'async' mode. Writes will NOT be imediately written to disk."
+    sed -i "s/{{ASYNC}}/async/g" /etc/exports
+fi
+
+# partially set 'unofficial Bash Strict Mode' as described here: http://redsymbol.net/articles/unofficial-bash-strict-mode/
+# we don't set -e because the pidof command returns an exit code of 1 when the specified process is
+# not found. we expect this at times and don't want the script to be terminated when it occurs.
+set -uo pipefail
+IFS=$'\n\t'
+
+# this loop runs till until we've started up successfully
+while true; do
+
+    # check if NFS is running by recording its PID
+    # if it is not running $pid will be null
+    pid=`pidof rpc.mountd`
+
+    # if $pid is null, do this to start or restart NFS
+    while [ -z "$pid" ]; do
+        # normally only required if v3 will be used
+        # but currently enabled to overcome an NFS bug around opening an IPv6 socket
+        echo "Starting rpcbind."
+        /sbin/rpcbind -w
+
+        echo "Starting nfsd."
+        /usr/sbin/rpc.nfsd --no-udp --no-nfs-version 2 --no-nfs-version 3
+
+        echo "Exporting file system."
+        if /usr/sbin/exportfs -rv; then
+            /usr/sbin/exportfs 1>/dev/null
+        else
+            echo "Export validation failed, exiting."
+            exit 1
+        fi
+
+        echo "Starting mountd."
+        /usr/sbin/rpc.mountd --debug all --no-udp --no-nfs-version 2 --no-nfs-version 3
+
+        # check if NFS is now running by recording its PID (if it is not running then $pid will be null)
+        pid=`pidof rpc.mountd`
+
+        # if $pid is null then startup failed
+        # log that fact and sleep for 2s and then we'll loop and try again
+        if [ -z "$pid" ]; then
+            echo "Startup of mountd failed. Sleeping before retrying."
+            sleep 2
+        fi
+    done
+
+    # break this outer loop once we've started up successfully.
+    # otherwise, we'll silently restart and Docker won't know why.
+    echo "Startup successful."
+    break
+
+done
+
+while true; do
+    # check if NFS is STILL running by recording its PID (if it is not running then $pid will be null)
+    pid=`pidof rpc.mountd`
+
+    # if it is not then kill our PID1 process (this script) by breaking out of this while loop.
+    # this ensures Docker observes the failure and handles it as necessary.
+    if [ -z "$pid" ]; then
+      echo "NFS has failed, exiting to allow the container to restart."
+      break
+    fi
+
+    # if it is running then give the CPU a rest
+    sleep 5
+done
+
+exit 1
