@@ -1,4 +1,4 @@
-FROM alpine:latest@sha256:efd0190b26581b93c8cfdaa4c8dfaa4e29a06b32b7f061b97c2a217cfc62809a
+FROM alpine:latest@sha256:686d8c9dfa6f3ccfc8230bc3178d23f84eeaf7e457f36f271ab1acc53015037c
 
 # github metadata
 LABEL org.opencontainers.image.source=https://github.com/paullockaby/nfs-server
